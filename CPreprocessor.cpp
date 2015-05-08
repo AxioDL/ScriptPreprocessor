@@ -72,6 +72,16 @@ void CPreprocessor::registerPragma(const std::string& name, std::function<void (
     m_registeredPragmas[name] = cb;
 }
 
+void CPreprocessor::registerHook(const std::string& name, std::function<void (CLexer::TokenList&, CPreprocessor::DefineTable&)> cb)
+{
+    std::string pre = "#" + name;
+    HookIterator iter = m_registeredHooks.find(pre);
+    if (iter != m_registeredHooks.end())
+        m_registeredHooks.erase(iter);
+
+    m_registeredHooks[pre] = cb;
+}
+
 std::string CPreprocessor::finalizedSource()
 {
     std::string ret;
@@ -126,7 +136,7 @@ std::string CPreprocessor::_loadSource(const std::string& filename)
     return code;
 }
 
-void CPreprocessor::_advanceList(CLexer::TokenList& tokens)
+void CPreprocessor::advanceList(CLexer::TokenList& tokens)
 {
     tokens.pop_front();
     while(true)
@@ -243,6 +253,12 @@ void CPreprocessor::preprocessRecursive(const std::string& filename, const std::
                 _parseWarning(directive, defineTable);
             else if (value == "#error")
                 _parseError(directive, defineTable);
+            else
+            {
+                HookIterator iter = m_registeredHooks.find(value);
+                if (iter != m_registeredHooks.end() && m_registeredHooks[value])
+                    m_registeredHooks[value](directive, defineTable);
+            }
         }
         else if (begin->type == CLexer::IDENTIFIER)
         {
@@ -390,7 +406,7 @@ CLexer::TokenIterator CPreprocessor::_expandDefine(CLexer::TokenIterator begin, 
 
 void CPreprocessor::_parseDefine(CPreprocessor::DefineTable& defineTable, CLexer::TokenList& tokens)
 {
-    _advanceList(tokens);
+    advanceList(tokens);
     if (tokens.empty())
     {
         printErrorMessage("Define directive without arguments");
@@ -408,7 +424,7 @@ void CPreprocessor::_parseDefine(CPreprocessor::DefineTable& defineTable, CLexer
         printErrorMessage(name.value + " already defined.");
         return;
     }
-    _advanceList(tokens);
+    advanceList(tokens);
 
     DefineEntry def;
 
@@ -417,14 +433,14 @@ void CPreprocessor::_parseDefine(CPreprocessor::DefineTable& defineTable, CLexer
         if (tokens.begin()->type == CLexer::PREPROCESSOR && tokens.begin()->value == "#")
         {
             // macro has arguments
-            _advanceList(tokens);
+            advanceList(tokens);
 
             if (tokens.empty() || tokens.begin()->value != "(")
             {
                 printErrorMessage("Expected arguments");
                 return;
             }
-            _advanceList(tokens);
+            advanceList(tokens);
 
             int argCount = 0;
             while (!tokens.empty() && tokens.begin()->value != ")")
@@ -436,9 +452,9 @@ void CPreprocessor::_parseDefine(CPreprocessor::DefineTable& defineTable, CLexer
                 }
 
                 def.arguments[tokens.begin()->value] = argCount;
-                _advanceList(tokens);
+                advanceList(tokens);
                 if (!tokens.empty() && tokens.begin()->value == ",")
-                    _advanceList(tokens);
+                    advanceList(tokens);
                 argCount++;
             }
 
@@ -449,7 +465,7 @@ void CPreprocessor::_parseDefine(CPreprocessor::DefineTable& defineTable, CLexer
                     printErrorMessage("Expected closing parentheses");
                     return;
                 }
-                _advanceList(tokens);
+                advanceList(tokens);
             }
             else
             {
@@ -500,7 +516,7 @@ CLexer::TokenIterator CPreprocessor::_parseIfDef(CLexer::TokenIterator begin, CL
 
 void CPreprocessor::_parseIf(CLexer::TokenList& directive, std::string& nameOut)
 {
-    _advanceList(directive);
+    advanceList(directive);
     if (directive.empty())
     {
         printErrorMessage("Expected argument.");
@@ -508,14 +524,14 @@ void CPreprocessor::_parseIf(CLexer::TokenList& directive, std::string& nameOut)
     }
 
     nameOut = directive.begin()->value;
-    _advanceList(directive);
+    advanceList(directive);
     if (!directive.empty())
         printErrorMessage("Too many arguments.");
 }
 
 void CPreprocessor::_parsePragma(CLexer::TokenList& args)
 {
-    _advanceList(args);
+    advanceList(args);
     if (args.empty())
     {
         printErrorMessage("Pragmas need arguments.");
@@ -523,7 +539,7 @@ void CPreprocessor::_parsePragma(CLexer::TokenList& args)
     }
     std::string pragmaName = args.begin()->value;
 
-    _advanceList(args);
+    advanceList(args);
 
     std::string pragmaArgs;
     if (!args.empty())
@@ -531,7 +547,7 @@ void CPreprocessor::_parsePragma(CLexer::TokenList& args)
         if (args.begin()->type != CLexer::STRING)
             printErrorMessage("Pragma parameter should be a string literal");
         pragmaArgs = removeQuotes(args.begin()->value);
-        _advanceList(args);
+        advanceList(args);
     }
     if (!args.empty())
         printErrorMessage("Too many paremeters for pragma.");
@@ -573,7 +589,7 @@ std::string CPreprocessor::_expandMessage(DefineTable& defineTable, CLexer::Toke
 
 void CPreprocessor::_parseWarning(CLexer::TokenList& args, DefineTable& defineTable)
 {
-    _advanceList(args);
+    advanceList(args);
     if (args.empty())
     {
         printErrorMessage("Warnings need messages.");
@@ -586,7 +602,7 @@ void CPreprocessor::_parseWarning(CLexer::TokenList& args, DefineTable& defineTa
 
 void CPreprocessor::_parseError(CLexer::TokenList& args, CPreprocessor::DefineTable& defineTable)
 {
-    _advanceList(args);
+    advanceList(args);
     if (args.empty())
     {
         printErrorMessage("Errors need messages.");

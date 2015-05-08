@@ -33,8 +33,8 @@ int CLexer::lex(char* start, char* end, TokenList& tokens)
     {
         CLexer::Token currentToken;
         start = _parseToken(start, end, currentToken);
-        if (currentToken.type != CLexer::COMMENT)
-            tokens.push_back(currentToken);
+        //if (currentToken.type != CLexer::COMMENT)
+        tokens.push_back(currentToken);
         if (start == end)
             return 0;
     }
@@ -128,7 +128,7 @@ char* CLexer::_parseLineComment(char* start, char* end, CLexer::Token& out)
         ++start;
         if (start == end)
             return start;
-        out.value += start;
+        out.value += *start;
         if  (*start == '\n')
             return start;
     }
@@ -154,6 +154,7 @@ char* CLexer::_parseBlockComment(char* start, char* end, CLexer::Token& out)
             if (*start == '/')
             {
                 out.value += *start;
+                ++start;
                 break;
             }
             else

@@ -12,9 +12,21 @@ void printTokenList(CLexer::TokenList& out)
     std::cout << std::endl;
 }
 
+
+void linkInstancePreprocessor(CLexer::TokenList& tokens, CPreprocessor::DefineTable& defineTable)
+{
+    (void)(defineTable);
+    CPreprocessor::advanceList(tokens);
+    if (tokens.size() == 0)
+        return;
+
+    std::cout << tokens.begin()->value << std::endl;
+}
+
 int main()
 {
     CPreprocessor preprocessor;
+    preprocessor.registerHook("link_instance", linkInstancePreprocessor);
     preprocessor.preprocessFile("main.as");
     std::cout << preprocessor.finalizedSource() << std::endl;
     return 0;

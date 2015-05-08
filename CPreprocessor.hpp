@@ -32,14 +32,19 @@ public:
     typedef DefineTable::iterator DefineIterator;
     typedef std::map<std::string, std::function<void(PragmaInstance)> > PragmaMap;
     typedef PragmaMap::iterator PragmaIterator;
+    typedef std::map<std::string, std::function<void(CLexer::TokenList&, DefineTable&)> > HookMap;
+    typedef HookMap::iterator HookIterator;
 
     void define(const std::string& def);
     void undefine(const std::string& def);
     void registerPragma(const std::string& name, std::function<void(PragmaInstance)>  cb);
+    void registerHook(const std::string& name, std::function<void(CLexer::TokenList&, DefineTable&)> cb);
 
     std::string finalizedSource();
     int preprocessFile(const std::string& filename);
     int preprocessCode(const std::string& filename, const std::string& code);
+
+    static void advanceList(CLexer::TokenList& tokens);
 private:
     std::string _loadSource(const std::string& filename);
     void printErrorMessage(const std::string& errMsg);
@@ -48,7 +53,6 @@ private:
     void preprocessRecursive(const std::string& filename, const std::string& code, CLexer::TokenList& tokens, DefineTable& defineTable);
 
     void callPragma(const std::string& name, const PragmaInstance& parms);
-    void _advanceList(CLexer::TokenList& tokens);
     CLexer::TokenIterator _findToken(CLexer::TokenIterator begin, CLexer::TokenIterator end, CLexer::TokenType type);
     CLexer::TokenIterator _parseStatement(CLexer::TokenIterator begin, CLexer::TokenIterator end, CLexer::TokenList& dest);
     CLexer::TokenIterator _parseDefineArguments(CLexer::TokenIterator begin, CLexer::TokenIterator end, CLexer::TokenList& tokens, std::vector<CLexer::TokenList>& args);
@@ -63,6 +67,7 @@ private:
 
     DefineTable      m_applicationDefined;
     PragmaMap        m_registeredPragmas;
+    HookMap          m_registeredHooks;
     CLineTranslator  m_lineTranslator;
     CLexer::TokenList m_tokens;
 
