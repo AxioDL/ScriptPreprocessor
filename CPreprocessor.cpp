@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <sstream>
 #include <iostream>
+#include <algorithm>
 
 static std::string removeQuotes(const std::string& in)
 {
@@ -41,6 +42,7 @@ static void setFileMacro(CPreprocessor::DefineTable& defineTable, const std::str
 }
 
 CPreprocessor::CPreprocessor()
+    : m_errorCount(0)
 {
 }
 
@@ -72,7 +74,9 @@ void CPreprocessor::registerPragma(const std::string& name, std::function<void (
     m_registeredPragmas[name] = cb;
 }
 
-void CPreprocessor::registerHook(const std::string& name, std::function<void (CLexer::TokenList&, CPreprocessor::DefineTable&)> cb)
+void CPreprocessor::registerHook(const std::string& name, std::function<void (CLexer::TokenList&,
+                                                                              CPreprocessor::DefineTable&,
+                                                                              PreprocessorState)> cb)
 {
     std::string pre = "#" + name;
     HookIterator iter = m_registeredHooks.find(pre);
@@ -91,17 +95,19 @@ std::string CPreprocessor::finalizedSource()
     return ret;
 }
 
-int CPreprocessor::preprocessFile(const std::string& filename)
+bool CPreprocessor::preprocessFile(const std::string& filename)
 {
     std::string code = _loadSource(filename);
     if (code == std::string())
+    {
         printErrorMessage(std::string("Empty source file specified: ") + filename);
-    else
-        preprocessCode(filename, code);
-    return m_errorCount;
+        return false;
+    }
+
+    return preprocessCode(filename, code);;
 }
 
-int CPreprocessor::preprocessCode(const std::string& filename, const std::string& code)
+bool CPreprocessor::preprocessCode(const std::string& filename, const std::string& code)
 {
     m_currentLine = 0;
     m_errorCount = 0;
@@ -109,9 +115,8 @@ int CPreprocessor::preprocessCode(const std::string& filename, const std::string
     DefineTable defineTable = m_applicationDefined;
     m_lineTranslator.reset();
     m_tokens.clear();
-    preprocessRecursive(filename, code, m_tokens, defineTable);
 
-    return m_errorCount;
+    return preprocessRecursive(filename, code, m_tokens, defineTable);;
 }
 
 std::string CPreprocessor::_loadSource(const std::string& filename)
@@ -158,7 +163,22 @@ void CPreprocessor::printWarningMessage(const std::string& warnMesg)
     std::cout << warnMesg << std::endl;
 }
 
-void CPreprocessor::preprocessRecursive(const std::string& filename, const std::string& code, CLexer::TokenList& tokens, DefineTable& defineTable)
+CLexer::TokenIterator CPreprocessor::_parseIdentifier(CLexer::TokenIterator begin, CLexer::TokenIterator end, CLexer::TokenList& tokens, DefineTable& defineTable)
+{
+    std::string macroName = begin->value;
+    MacroIterator iter = std::find_if(m_macros.begin(), m_macros.end(), [&macroName](const Macro& m) -> bool { return m.name == macroName; });
+    if (iter != m_macros.end())
+    {
+        _expandMacro(begin, end, tokens, *iter);
+        --begin;
+    }
+    else
+        begin = _expandDefine(begin, end, tokens, defineTable);
+
+    return begin;
+}
+
+bool CPreprocessor::preprocessRecursive(const std::string& filename, const std::string& code, CLexer::TokenList& tokens, DefineTable& defineTable)
 {
     unsigned int startLine = m_currentLine;
     m_currentFile = filename;
@@ -184,10 +204,42 @@ void CPreprocessor::preprocessRecursive(const std::string& filename, const std::
             ++begin;
             setLineMacro(defineTable, m_currentFileLines);
         }
+        else if (begin->type == CLexer::MACRO)
+        {
+            CLexer::TokenIterator lineStart = begin;
+            CLexer::TokenIterator lineEnd = _findToken(begin, end, CLexer::NEWLINE);
+            CLexer::TokenList directive(lineStart, lineEnd);
+            begin = tokens.erase(lineStart, lineEnd);
+            advanceList(directive);
+            Macro macro;
+            macro.name = directive.begin()->value;
+            while (directive.begin()->type != CLexer::CLOSE && directive.begin()->value != ")")
+            {
+                advanceList(directive);
+                if (directive.empty())
+                    break;
+
+                if (directive.begin()->type == CLexer::IDENTIFIER || directive.begin()->type == CLexer::PREPROCESSOR)
+                   macro.args.push_back(*directive.begin());
+            }
+
+            advanceList(directive);
+            while(directive.begin()->value != "\n")
+            {
+                if (directive.empty())
+                    break;
+                if(directive.begin()->value != "\\")
+                    macro.code.push_back(*directive.begin());
+
+                directive.pop_front();
+            }
+            m_macros.push_back(macro);
+        }
         else if (begin->type == CLexer::PREPROCESSOR)
         {
             CLexer::TokenIterator lineStart = begin;
             CLexer::TokenIterator lineEnd = _findToken(begin, end, CLexer::NEWLINE);
+
             CLexer::TokenList directive(lineStart, lineEnd);
             begin = tokens.erase(lineStart, lineEnd);
 
@@ -257,16 +309,40 @@ void CPreprocessor::preprocessRecursive(const std::string& filename, const std::
             {
                 HookIterator iter = m_registeredHooks.find(value);
                 if (iter != m_registeredHooks.end() && m_registeredHooks[value])
-                    m_registeredHooks[value](directive, defineTable);
+                {
+                    PreprocessorState state;
+                    state.currentFile = m_currentFile;
+                    state.rootFile = m_rootFile;
+                    state.currentLine = m_currentFileLines;
+                    state.globalLine = m_currentLine;
+                    m_registeredHooks[value](directive, defineTable, state);
+                }
             }
         }
         else if (begin->type == CLexer::IDENTIFIER)
+            begin = _parseIdentifier(begin, end, tokens, defineTable);
+        else if (begin->degenerate)
         {
-            begin = _expandDefine(begin, end, tokens, defineTable);
+            switch(begin->type)
+            {
+                case CLexer::COMMENT:
+                {
+                    std::stringstream ss;
+                    ss << m_currentFile << ": Degenerate comment on line " << m_currentFileLines << std::endl;
+                    printErrorMessage(ss.str());
+                    break;
+                }
+                default:
+                    printErrorMessage(m_currentFile + ": Degenerate token: " + begin->value);
+            }
+
+            ++begin;
         }
         else
             ++begin;
     }
+
+    return !(m_errorCount > 0);
 }
 
 void CPreprocessor::callPragma(const std::string& name, const PragmaInstance& parms)
@@ -404,6 +480,80 @@ CLexer::TokenIterator CPreprocessor::_expandDefine(CLexer::TokenIterator begin, 
     return begin;
 }
 
+void CPreprocessor::_expandMacro(CLexer::TokenIterator begin, CLexer::TokenIterator end, CLexer::TokenList& tokens, const CPreprocessor::Macro& macro)
+{
+    std::vector<CLexer::Token>  macroArgs = macro.args;
+    std::vector<CLexer::Token>  args;
+    std::vector<CLexer::Token>  code = macro.code;
+    std::vector<CLexer::Token>::iterator codeIter = code.begin();
+
+    int depth = 0;
+    while (true)
+    {
+        begin = tokens.erase(begin);
+        if (begin == end)
+            break;
+        if (begin->type == CLexer::OPEN && begin->value == "(")
+        {
+            depth++;
+            continue;
+        }
+
+        if (begin->type == CLexer::CLOSE && begin->value == ")")
+        {
+            depth--;
+            if (depth == 0)
+            {
+                begin = tokens.erase(begin);
+                break;
+            }
+        }
+
+        if (begin->type != CLexer::COMMA && begin->type != CLexer::WHITESPACE)
+        {
+            args.push_back(*begin);
+        }
+    }
+
+    if (args.empty())
+    {
+        printErrorMessage("Expected args");
+        return;
+    }
+
+    if (args.size() != macroArgs.size())
+    {
+        printErrorMessage("Argument count mismatch");
+        return;
+    }
+
+    while (codeIter != code.end())
+    {
+        std::string value = codeIter->value;
+        bool stringify = (value[0] == '#');
+        if (stringify)
+            value.erase(value.begin());
+
+        auto it = std::find_if(macroArgs.begin(), macroArgs.end(), [&value](const CLexer::Token& t) -> bool { return t.value == value; });
+        if (it != macroArgs.end())
+        {
+            int index = it - macroArgs.begin();
+            code.erase(codeIter);
+            code.insert(codeIter, *(args.begin() + index));
+            if (stringify)
+            {
+                codeIter->type = CLexer::STRING;
+                codeIter->value = "\"" + codeIter->value + "\"";
+            }
+        }
+        ++codeIter;
+    }
+
+    CLexer::TokenList newCode;
+    std::copy(code.begin(), code.end(), std::back_inserter(newCode));
+    tokens.splice(begin, newCode);
+}
+
 void CPreprocessor::_parseDefine(CPreprocessor::DefineTable& defineTable, CLexer::TokenList& tokens)
 {
     advanceList(tokens);
@@ -430,7 +580,7 @@ void CPreprocessor::_parseDefine(CPreprocessor::DefineTable& defineTable, CLexer
 
     if (!tokens.empty())
     {
-        if (tokens.begin()->type == CLexer::PREPROCESSOR && tokens.begin()->value == "#")
+        if (tokens.begin()->type == CLexer::PREPROCESSOR || tokens.begin()->type == CLexer::MACRO)
         {
             // macro has arguments
             advanceList(tokens);
@@ -526,7 +676,7 @@ void CPreprocessor::_parseIf(CLexer::TokenList& directive, std::string& nameOut)
     nameOut = directive.begin()->value;
     advanceList(directive);
     if (!directive.empty())
-        printErrorMessage("Too many arguments.");
+        printErrorMessage((m_lineTranslator.resolveOriginalFile(m_currentLine) + ": Too many arguments."));
 }
 
 void CPreprocessor::_parsePragma(CLexer::TokenList& args)
@@ -550,15 +700,15 @@ void CPreprocessor::_parsePragma(CLexer::TokenList& args)
         advanceList(args);
     }
     if (!args.empty())
-        printErrorMessage("Too many paremeters for pragma.");
+        printErrorMessage((m_lineTranslator.resolveOriginalFile(m_currentLine) +  ": Too many paremeters for pragma."));
 
     PragmaInstance pi;
     pi.name = pragmaName;
     pi.text = pragmaArgs;
-    pi.currentFile = m_currentFile;
-    pi.currentLine = m_currentFileLines;
-    pi.rootFile    = m_rootFile;
-    pi.globalLine  = m_currentLine;
+    pi.state.currentFile = m_currentFile;
+    pi.state.currentLine = m_currentFileLines;
+    pi.state.rootFile    = m_rootFile;
+    pi.state.globalLine  = m_currentLine;
     callPragma(pragmaName, pi);
 }
 
@@ -597,7 +747,7 @@ void CPreprocessor::_parseWarning(CLexer::TokenList& args, DefineTable& defineTa
     }
 
     std::string msg = _expandMessage(defineTable, args);
-    printWarningMessage(msg);
+    printWarningMessage((m_lineTranslator.resolveOriginalFile(m_currentLine) + ": Warning ") + msg);
 }
 
 void CPreprocessor::_parseError(CLexer::TokenList& args, CPreprocessor::DefineTable& defineTable)
